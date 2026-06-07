@@ -1,0 +1,17 @@
+node_modules/
+.next/
+dist/
+.expo/
+web-build/
+.turbo/
+*.log
+.env
+.env.local
+.DS_Store
+*.pem
+coverage/
+.nyc_output/
+.data/
+backups/
+docker/certbot/conf/
+docker/certbot/www/

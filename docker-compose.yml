@@ -1,0 +1,319 @@
+version: "3.8"
+
+# ================================================================
+# SHELTER ACCORD — Docker Compose
+# Supabase self-hosted + Admin Panel + Web App
+#
+# Перший запуск:
+#   cp .env.example .env   # відредагуйте паролі та ключі
+#   docker-compose up -d
+#   docker-compose exec db psql -U postgres -f /docker-entrypoint-initdb.d/001_schema.sql
+#   docker-compose exec db psql -U postgres -f /docker-entrypoint-initdb.d/002_seed.sql
+# ================================================================
+
+x-supabase-env: &supabase-env
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-postgres}
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
+  JWT_SECRET: ${JWT_SECRET:?err}
+  ANON_KEY: ${ANON_KEY:?err}
+  SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY:?err}
+
+services:
+
+  # ──────────────────────────────────────────────────
+  # DATABASE
+  # ──────────────────────────────────────────────────
+  db:
+    image: supabase/postgres:15.8.1.060
+    container_name: shelter-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      JWT_SECRET: ${JWT_SECRET:?err}
+    volumes:
+      # Дані БД лежать у папці проекту (./.data/db) — переживають навіть `down -v`.
+      - ./.data/db:/var/lib/postgresql/data
+      # ПРИМІТКА: схема (001) посилається на auth.users, а схему `auth` створює
+      # сервіс auth (GoTrue) під час старту, а не initdb. Тому schema/seed
+      # застосовуються ВРУЧНУ після того як auth підніметься (див. SETUP.md).
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ──────────────────────────────────────────────────
+  # AUTH (GoTrue)
+  # ──────────────────────────────────────────────────
+  auth:
+    image: supabase/gotrue:v2.158.1
+    container_name: shelter-auth
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *supabase-env
+      GOTRUE_API_HOST: "0.0.0.0"
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL:-http://localhost:8000}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: "postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres"
+      GOTRUE_SITE_URL: ${SITE_URL:-http://localhost:3000}
+      GOTRUE_URI_ALLOW_LIST: "*"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?err}
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-Shelter Accord}
+      GOTRUE_MAILER_URLPATHS_INVITE: "/auth/v1/verify"
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: "/auth/v1/verify"
+      GOTRUE_MAILER_URLPATHS_RECOVERY: "/auth/v1/verify"
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: "/auth/v1/verify"
+
+  # ──────────────────────────────────────────────────
+  # MIGRATOR (one-shot: post-init fixes + apply migrations)
+  # ──────────────────────────────────────────────────
+  migrator:
+    image: postgres:15-alpine
+    container_name: shelter-migrator
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_started
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
+      DB_HOST: db
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./supabase/migrate.sh:/migrate.sh:ro
+    entrypoint: ["sh", "/migrate.sh"]
+
+  # ──────────────────────────────────────────────────
+  # REST (PostgREST)
+  # ──────────────────────────────────────────────────
+  rest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: shelter-rest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: "postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres"
+      PGRST_DB_SCHEMAS: "public,storage,graphql_public"
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET:?err}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET:?err}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+
+  # ──────────────────────────────────────────────────
+  # REALTIME
+  # ──────────────────────────────────────────────────
+  realtime:
+    image: supabase/realtime:v2.34.47
+    container_name: shelter-realtime
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      RUN_JANITOR: "true"
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: ${JWT_SECRET:?err}
+      FLY_ALLOC_ID: fly123
+      FLY_APP_NAME: realtime
+      SECRET_KEY_BASE: UpNVntn3cDxHJpq99YMc1T1AQgQpc8kfYTuRgBiYa15BLrx8etQoXz3gZv1/u2oq
+      ERL_AFLAGS: -proto_dist inet_tcp
+      ENABLE_TAILSCALE: "false"
+      DNS_NODES: "''"
+
+  # ──────────────────────────────────────────────────
+  # STORAGE
+  # ──────────────────────────────────────────────────
+  storage:
+    image: supabase/storage-api:v1.11.13
+    container_name: shelter-storage
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ANON_KEY: ${ANON_KEY:?err}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:?err}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET:?err}
+      DATABASE_URL: "postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres"
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      PORT: 5000
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+    volumes:
+      - ./.data/storage:/var/lib/storage
+
+  # ──────────────────────────────────────────────────
+  # IMAGE PROXY
+  # ──────────────────────────────────────────────────
+  imgproxy:
+    image: darthsim/imgproxy:v3.8.0
+    container_name: shelter-imgproxy
+    restart: unless-stopped
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+    volumes:
+      - ./.data/storage:/var/lib/storage:ro
+    healthcheck:
+      test: ["CMD", "imgproxy", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  # ──────────────────────────────────────────────────
+  # META (pg-meta for Studio)
+  # ──────────────────────────────────────────────────
+  meta:
+    image: supabase/postgres-meta:v0.84.2
+    container_name: shelter-meta
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # ──────────────────────────────────────────────────
+  # KONG (API Gateway)
+  # ──────────────────────────────────────────────────
+  kong:
+    image: kong:2.8.1
+    container_name: shelter-kong
+    restart: unless-stopped
+    ports:
+      - "8000:8000"  # Supabase API
+      - "8443:8443"  # Supabase API (HTTPS)
+    depends_on:
+      db:
+        condition: service_healthy
+    # Bash eval підставляє $SUPABASE_ANON_KEY і $SUPABASE_SERVICE_KEY з env у kong.yml
+    entrypoint: bash -c 'eval "echo \"$$(cat /home/kong/temp.yml)\"" > /home/kong/kong.yml && /docker-entrypoint.sh kong docker-start'
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      SUPABASE_ANON_KEY: ${ANON_KEY:?err}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:?err}
+    volumes:
+      - ./docker/kong.yml:/home/kong/temp.yml:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ──────────────────────────────────────────────────
+  # STUDIO (Supabase UI)
+  # ──────────────────────────────────────────────────
+  studio:
+    image: supabase/studio:20250317-6955350
+    container_name: shelter-studio
+    restart: unless-stopped
+    ports:
+      - "3333:3000"
+    depends_on:
+      kong:
+        condition: service_healthy
+    environment:
+      HOSTNAME: "0.0.0.0"
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-http://localhost:8000}
+      SUPABASE_ANON_KEY: ${ANON_KEY:?err}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:?err}
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
+      DEFAULT_ORGANIZATION_NAME: "Shelter Accord"
+      DEFAULT_PROJECT_NAME: "shelter-accord"
+      SUPABASE_FUNCTIONS_URL: "http://localhost:8000/functions/v1"
+      AUTH_JWT_SECRET: ${JWT_SECRET:?err}
+      LOGFLARE_API_KEY: ""
+      NEXT_ANALYTICS_BACKEND_PROVIDER: ""
+
+  # ──────────────────────────────────────────────────
+  # ADMIN PANEL (Next.js + React Admin)
+  # ──────────────────────────────────────────────────
+  admin:
+    build:
+      context: ./apps/admin
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?err}
+    container_name: shelter-admin
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    depends_on:
+      kong:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-http://localhost:8000}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?err}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY:?err}
+
+  # ──────────────────────────────────────────────────
+  # WEB APP (Expo web build)
+  # ──────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: apps/mobile/Dockerfile
+      args:
+        EXPO_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-http://localhost:8000}
+        EXPO_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?err}
+    container_name: shelter-web
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      kong:
+        condition: service_healthy

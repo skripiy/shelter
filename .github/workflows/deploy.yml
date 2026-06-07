@@ -1,0 +1,90 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:   # ручний запуск із GitHub UI
+
+concurrency:
+  group: production
+  cancel-in-progress: false   # не скасовувати поточний деплой
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Validate env secrets ──────────────────────────────
+      - name: Check required secrets
+        run: |
+          for secret in SSH_HOST SSH_USER SSH_PRIVATE_KEY DEPLOY_PATH; do
+            if [ -z "${!secret}" ]; then
+              echo "❌ Secret $secret is not set"
+              exit 1
+            fi
+          done
+          echo "✅ All required secrets present"
+        env:
+          SSH_HOST:        ${{ secrets.SSH_HOST }}
+          SSH_USER:        ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_PATH:     ${{ secrets.DEPLOY_PATH }}
+
+      # ── 3. Deploy via SSH ────────────────────────────────────
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:        ${{ secrets.SSH_HOST }}
+          username:    ${{ secrets.SSH_USER }}
+          key:         ${{ secrets.SSH_PRIVATE_KEY }}
+          port:        ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            echo "🚀 Starting deploy at $(date)"
+
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Rebuild and restart (migrations apply automatically via migrator)
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.prod.yml \
+              up -d --build --remove-orphans
+
+            # Wait for web container to be healthy
+            echo "⏳ Waiting for services..."
+            sleep 10
+
+            # Quick health check
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/ || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "✅ Deploy successful (HTTP $HTTP_CODE)"
+            else
+              echo "⚠️  Unexpected HTTP code: $HTTP_CODE — check logs"
+              docker compose logs --tail=50 web
+            fi
+
+            # Remove unused images
+            docker image prune -f --filter "until=24h"
+
+            echo "✅ Done at $(date)"
+
+      # ── 4. Notify on failure ─────────────────────────────────
+      - name: Notify failure
+        if: failure()
+        run: |
+          echo "❌ Deploy failed!"
+          echo "Commit: ${{ github.sha }}"
+          echo "Author: ${{ github.actor }}"
+          # Add notification (Telegram/Slack) here if needed

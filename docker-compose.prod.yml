@@ -1,0 +1,85 @@
+# ================================================================
+# SHELTER ACCORD — Production Overrides
+# Використання:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Що змінює відносно базового файлу:
+#   • Додає зовнішній nginx з SSL (Let's Encrypt / Certbot)
+#   • Закриває внутрішні порти — назовні лише 80 + 443
+#   • Вимикає Supabase Studio (безпека)
+#   • Встановлює restart: always
+# ================================================================
+
+services:
+
+  # ── Зовнішній Nginx (SSL termination) ─────────────────────────
+  nginx-proxy:
+    image: nginx:1.25-alpine
+    container_name: shelter-nginx-proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/certbot/www:/var/www/certbot:ro
+      - ./docker/certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      - web
+      - kong
+    networks:
+      - default
+
+  # ── Certbot (Let's Encrypt) ────────────────────────────────────
+  certbot:
+    image: certbot/certbot:latest
+    container_name: shelter-certbot
+    restart: "no"
+    volumes:
+      - ./docker/certbot/www:/var/www/certbot
+      - ./docker/certbot/conf:/etc/letsencrypt
+    # Запускайте вручну для отримання/оновлення сертифікату:
+    #   docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm certbot \
+    #     certonly --webroot --webroot-path=/var/www/certbot \
+    #     -d yourdomain.com -d www.yourdomain.com --email your@email.com --agree-tos
+    command: "--version"
+
+  # ── Закриваємо зовнішні порти у сервісів ─────────────────────
+  db:
+    restart: always
+    ports: []        # не відкриваємо 5432 назовні в продакшні
+
+  auth:
+    restart: always
+
+  rest:
+    restart: always
+
+  realtime:
+    restart: always
+
+  storage:
+    restart: always
+
+  imgproxy:
+    restart: always
+
+  meta:
+    restart: always
+
+  kong:
+    restart: always
+    ports: []        # закриваємо прямий доступ — лише через nginx-proxy
+
+  admin:
+    restart: always
+    ports: []        # закриваємо прямий доступ
+
+  web:
+    restart: always
+    ports: []        # закриваємо прямий доступ
+
+  # ── Вимикаємо Studio (не для публічного продакшну) ────────────
+  studio:
+    profiles:
+      - dev-only     # не запускається без --profile dev-only
