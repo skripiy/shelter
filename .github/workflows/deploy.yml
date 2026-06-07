@@ -1,90 +1,135 @@
-name: Deploy to Production
+name: Build → Push → Deploy
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:   # ручний запуск із GitHub UI
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: production
-  cancel-in-progress: false   # не скасовувати поточний деплой
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/shelter-web
+  ADMIN_IMAGE: ghcr.io/${{ github.repository_owner }}/shelter-admin
 
 jobs:
-  deploy:
-    name: Deploy
+  build-and-push:
+    name: Build & Push images
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write   # нужно для push в GHCR
+
+    outputs:
+      web_tag:   ${{ steps.meta-web.outputs.version }}
+      admin_tag: ${{ steps.meta-admin.outputs.version }}
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Validate env secrets ──────────────────────────────
-      - name: Check required secrets
-        run: |
-          for secret in SSH_HOST SSH_USER SSH_PRIVATE_KEY DEPLOY_PATH; do
-            if [ -z "${!secret}" ]; then
-              echo "❌ Secret $secret is not set"
-              exit 1
-            fi
-          done
-          echo "✅ All required secrets present"
-        env:
-          SSH_HOST:        ${{ secrets.SSH_HOST }}
-          SSH_USER:        ${{ secrets.SSH_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          DEPLOY_PATH:     ${{ secrets.DEPLOY_PATH }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 3. Deploy via SSH ────────────────────────────────────
-      - name: Deploy to server
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Web (Expo) ───────────────────────────────────────────
+      - name: Extract metadata (web)
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.WEB_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push web
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: apps/mobile/Dockerfile
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          build-args: |
+            EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+            EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          cache-from: type=registry,ref=${{ env.WEB_IMAGE }}:cache
+          cache-to:   type=registry,ref=${{ env.WEB_IMAGE }}:cache,mode=max
+
+      # ── Admin (Next.js) ──────────────────────────────────────
+      - name: Extract metadata (admin)
+        id: meta-admin
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ADMIN_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push admin
+        uses: docker/build-push-action@v5
+        with:
+          context: apps/admin
+          file: apps/admin/Dockerfile
+          push: true
+          tags: ${{ steps.meta-admin.outputs.tags }}
+          labels: ${{ steps.meta-admin.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          cache-from: type=registry,ref=${{ env.ADMIN_IMAGE }}:cache
+          cache-to:   type=registry,ref=${{ env.ADMIN_IMAGE }}:cache,mode=max
+
+  deploy:
+    name: Deploy to server
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host:        ${{ secrets.SSH_HOST }}
           username:    ${{ secrets.SSH_USER }}
           key:         ${{ secrets.SSH_PRIVATE_KEY }}
-          port:        ${{ secrets.SSH_PORT || 22 }}
           script_stop: true
           script: |
             set -e
-            echo "🚀 Starting deploy at $(date)"
-
             cd ${{ secrets.DEPLOY_PATH }}
 
-            # Pull latest code
-            git fetch origin main
-            git reset --hard origin/main
+            # Отримати свіжий код (тільки docker-compose файли і міграції)
+            git pull origin main
 
-            # Rebuild and restart (migrations apply automatically via migrator)
+            # Авторизація в GHCR (щоб тягнути образи)
+            echo "${{ secrets.GITHUB_TOKEN }}" | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
+
+            # Потягнути нові образи та перезапустити
             docker compose \
               -f docker-compose.yml \
               -f docker-compose.prod.yml \
-              up -d --build --remove-orphans
+              pull web admin
 
-            # Wait for web container to be healthy
-            echo "⏳ Waiting for services..."
-            sleep 10
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.prod.yml \
+              up -d --no-build
 
-            # Quick health check
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/ || echo "000")
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-              echo "✅ Deploy successful (HTTP $HTTP_CODE)"
-            else
-              echo "⚠️  Unexpected HTTP code: $HTTP_CODE — check logs"
-              docker compose logs --tail=50 web
-            fi
+            # Застосувати нові міграції (якщо є)
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.prod.yml \
+              up -d migrator
 
-            # Remove unused images
             docker image prune -f --filter "until=24h"
-
-            echo "✅ Done at $(date)"
-
-      # ── 4. Notify on failure ─────────────────────────────────
-      - name: Notify failure
-        if: failure()
-        run: |
-          echo "❌ Deploy failed!"
-          echo "Commit: ${{ github.sha }}"
-          echo "Author: ${{ github.actor }}"
-          # Add notification (Telegram/Slack) here if needed
+            echo "✅ Deployed at $(date)"

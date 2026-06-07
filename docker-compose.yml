@@ -30,8 +30,6 @@ services:
     image: supabase/postgres:15.8.1.060
     container_name: shelter-db
     restart: unless-stopped
-    ports:
-      - "5432:5432"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
@@ -226,9 +224,6 @@ services:
     image: kong:2.8.1
     container_name: shelter-kong
     restart: unless-stopped
-    ports:
-      - "8000:8000"  # Supabase API
-      - "8443:8443"  # Supabase API (HTTPS)
     depends_on:
       db:
         condition: service_healthy
@@ -258,8 +253,6 @@ services:
     image: supabase/studio:20250317-6955350
     container_name: shelter-studio
     restart: unless-stopped
-    ports:
-      - "3333:3000"
     depends_on:
       kong:
         condition: service_healthy
@@ -290,8 +283,6 @@ services:
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?err}
     container_name: shelter-admin
     restart: unless-stopped
-    ports:
-      - "3001:3000"
     depends_on:
       kong:
         condition: service_healthy
@@ -312,8 +303,6 @@ services:
         EXPO_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?err}
     container_name: shelter-web
     restart: unless-stopped
-    ports:
-      - "3000:80"
     depends_on:
       kong:
         condition: service_healthy
