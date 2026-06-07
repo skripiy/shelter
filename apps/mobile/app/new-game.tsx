@@ -2,9 +2,11 @@ import { useState } from 'react';
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, ActivityIndicator,
 } from 'react-native';
+import { Feather } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { setPlayerId } from '@/lib/player';
+import { C, R } from '@/theme';
 
 export default function NewGameScreen() {
   const [nickname, setNickname] = useState('');
@@ -39,67 +41,63 @@ export default function NewGameScreen() {
       <Stack.Screen options={{ title: 'Нова гра', headerShown: true }} />
 
       <View style={styles.body}>
+        <View style={styles.lead}>
+          <View style={styles.leadIcon}><Feather name="radio" size={18} color={C.accent} /></View>
+          <Text style={styles.leadTitle}>Створення кімнати</Text>
+          <Text style={styles.leadSub}>Катастрофу та укриття буде обрано випадково. Ви станете ведучим.</Text>
+        </View>
+
         <Text style={styles.label}>Ваш нікнейм</Text>
         <TextInput
           style={styles.input}
           value={nickname}
           onChangeText={setNickname}
           placeholder="Напр. Олекса"
-          placeholderTextColor="#475569"
+          placeholderTextColor={C.faint}
           autoFocus
           maxLength={24}
           editable={!loading}
           returnKeyType="go"
           onSubmitEditing={handleCreate}
         />
-        <Text style={styles.hint}>
-          Катастрофу та укриття буде обрано випадково. Ви станете ведучим кімнати.
-        </Text>
 
-        {error && <Text style={styles.error}>{error}</Text>}
+        {error && (
+          <View style={styles.errorBox}>
+            <Feather name="alert-triangle" size={13} color={C.danger} />
+            <Text style={styles.errorTxt}>{error}</Text>
+          </View>
+        )}
       </View>
 
       <TouchableOpacity
-        style={[styles.primaryBtn, !canStart && styles.primaryBtnDisabled]}
+        style={[styles.primaryBtn, !canStart && styles.disabled]}
         onPress={handleCreate}
         disabled={!canStart}
+        activeOpacity={0.85}
       >
         {loading
-          ? <ActivityIndicator color="#fff" />
-          : <Text style={styles.primaryBtnText}>🎮 Створити гру</Text>}
+          ? <ActivityIndicator color={C.accentInk} />
+          : <><Feather name="play" size={17} color={C.accentInk} /><Text style={styles.primaryBtnText}>Створити гру</Text></>}
       </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-    justifyContent: 'space-between',
-    paddingVertical: 40,
-    paddingHorizontal: 24,
-  },
+  container: { flex: 1, backgroundColor: C.bg, justifyContent: 'space-between', paddingVertical: 28, paddingHorizontal: 22 },
   body: { gap: 12 },
-  label: { color: '#f1f5f9', fontSize: 16, fontWeight: '600' },
-  input: {
-    backgroundColor: '#1e293b',
-    borderWidth: 1,
-    borderColor: '#334155',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    color: '#f1f5f9',
-    fontSize: 18,
-  },
-  hint: { color: '#64748b', fontSize: 13, lineHeight: 18 },
-  error: { color: '#f87171', fontSize: 14, marginTop: 8 },
-  primaryBtn: {
-    backgroundColor: '#3b82f6',
-    paddingVertical: 18,
-    borderRadius: 14,
-    alignItems: 'center',
-  },
-  primaryBtnDisabled: { backgroundColor: '#1e3a5f', opacity: 0.6 },
-  primaryBtnText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  lead: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.line, borderRadius: R.md, padding: 18, marginBottom: 10 },
+  leadIcon: { width: 38, height: 38, borderRadius: R.sm, backgroundColor: C.accentSoft, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  leadTitle: { color: C.text, fontSize: 18, fontWeight: '800', marginBottom: 4 },
+  leadSub: { color: C.muted, fontSize: 13, lineHeight: 19 },
+
+  label: { color: C.text, fontSize: 13, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },
+  input: { backgroundColor: C.raised, borderWidth: 1, borderColor: C.line2, borderRadius: R.md, paddingHorizontal: 16, paddingVertical: 14, color: C.text, fontSize: 18 },
+
+  errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.dangerSoft, borderWidth: 1, borderColor: '#e3c2b8', borderRadius: R.sm, padding: 10, marginTop: 4 },
+  errorTxt: { color: C.danger, fontSize: 13, flex: 1 },
+
+  primaryBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, backgroundColor: C.accent, paddingVertical: 16, borderRadius: R.md },
+  primaryBtnText: { color: C.accentInk, fontSize: 16, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.6 },
+  disabled: { opacity: 0.4 },
 });
