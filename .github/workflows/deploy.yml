@@ -108,8 +108,9 @@ jobs:
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
 
-            # Отримати свіжий код (тільки docker-compose файли і міграції)
-            git pull origin main
+            # Скинути локальні зміни і синхронізуватись з main
+            git fetch origin main
+            git reset --hard origin/main
 
             # Авторизація в GHCR (щоб тягнути образи)
             echo "${{ secrets.GITHUB_TOKEN }}" | \
